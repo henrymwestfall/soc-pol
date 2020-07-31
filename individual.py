@@ -1,15 +1,18 @@
 import math
 import random
+import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
+import networkx as nx
 import seaborn
 import cProfile
+from progress.bar import Bar
+
+import utils
 
 
 GRAVITY = 10
-NUM_MESSAGES = 100
-NUM_INDIVIDUALS = 3
 
 def get_bin_centers(bins):
     centers = []
@@ -26,9 +29,12 @@ def get_bin_centers(bins):
 
 
 class Individual:
-    def __init__(self):
+    def __init__(self, parent_network, tag):
+        self.network = parent_network
+        self.tag = tag
+
         self.belief_state = 0.0
-        self.mass = 1
+        self.mass = 100
         self.vel = 0.0
 
         self.friction_coefficient = 0.001
@@ -37,6 +43,14 @@ class Individual:
         self.belief_state_log = [self.belief_state]
         self.friction_log = [self.friction]
         self.vel_log = [self.vel]
+
+    @property
+    def inbound_connections(self):
+        return self.network.get_inbound_connections_to(self)
+
+    @property
+    def outbound_connections(self):
+        return self.network.get_outbound_connections_from(self)
 
     @property
     def internal_messages(self):
@@ -86,11 +100,12 @@ class Individual:
         self.vel_log.append(self.vel)
 
     def listen_to_other(self, everyone):
-        other = random.choice(everyone)
+        selection = everyone.copy() # shallow
+        if self in selection:
+            selection.remove(self)
 
-        # listen to someone else
-        while not (other is self):
-            other = random.choice(everyone)
+        if len(selection) > 0:
+            other = random.choice(selection)
             self.read_message(other.belief_state)
 
     def read_internal_message(self):
@@ -122,7 +137,7 @@ class Simulation:
         self.length = length
         self.population = population
 
-        self.individuals = [Individual() for i in range(population)]
+        self.network = Network(self.population)
 
         # logs
         self.full_belief_state_log = []
@@ -130,22 +145,25 @@ class Simulation:
         self.mean_log = [0 for i in range(self.length)]
 
     def run(self):
-        for step in range(self.length):
-            self.resolve_timestep(step)
+        with Bar('Running Simulation', fill='#', suffix='%(percent).1f%% - %(eta)ds') as bar:
+            for step in range(self.length):
+                self.resolve_timestep(step)
+                bar.next()
 
     def resolve_timestep(self, step):
         self.update_everyone()
         self.log_belief_states(step)
 
     def update_everyone(self):
-        for indv in self.individuals:
+        # TODO: use network connections
+        for indv in self.network.individuals:
             indv.read_internal_message()
-        for indv in self.individuals:
-            indv.listen_to_other(self.individuals)
+        for indv in self.network.individuals:
+            indv.listen_to_other(indv.outbound_connections)
 
     def log_belief_states(self, step):
         all_belief_states = []
-        for indv in self.individuals:
+        for indv in self.network.individuals:
             indv.log_belief_state()
             self.summed_log[step] += indv.belief_state
             self.mean_log[step] = self.summed_log[step] / self.population
@@ -154,7 +172,9 @@ class Simulation:
         self.full_belief_state_log.append(all_belief_states)
         
     def plot_results(self):
-        for indv in self.individuals:
+        self.network.draw_graph()
+
+        for indv in self.network.individuals:
             indv.plot_belief_states()
         plt.show()
 
@@ -162,8 +182,10 @@ class Simulation:
         plt.show()
 
         # create and save belief state plots over time
-        for timestep, _ in enumerate(self.full_belief_state_log):
-            self.display_belief_state_histogram(timestep, mode="save")
+        with Bar("Saving Plots", fill="#", suffix='%(percent).1f%% - %(eta)ds') as bar:
+            for timestep, _ in enumerate(self.full_belief_state_log):
+                self.display_belief_state_histogram(timestep, mode="save")
+                bar.next()
 
     def display_belief_state_histogram(self, timestep, bins=np.arange(-1.1,1.3,0.2), mode="save"):
         belief_states = np.array(self.full_belief_state_log[timestep])
@@ -198,106 +220,70 @@ class Simulation:
         random.seed(self.seed)
         np.random.seed(self.seed)
 
+
 class Network:
-    def __init__(self):
-        pass
+    def __init__(self, size):
+        self.size = size
+        self.graph = nx.scale_free_graph(self.size)
+        self.individuals = [Individual(self, tag) for tag in self.graph.nodes]
 
+    def draw_graph(self, max_node_size=300):
+        # determine node sizes
+        nodes = list(self.graph.nodes)
+        degrees = [self.graph.degree[n] for n in nodes]
+        highest = max(degrees)
+        node_sizes = [(d / highest) * max_node_size for d in degrees]
 
-def display_belief_state_histogram(timestep, full_belief_states, bins=np.arange(-1.1,1.3,0.2), mode="save"):
-    belief_states = np.array(full_belief_states[timestep])
-    
-    fig = plt.figure()
-    axes = plt.gca()
-    axes.set_ylim([0, 1])
-    axes.set_xlim([-1,1])
-
-    hist, _ = np.histogram(belief_states, bins)
-    normalized_hist = [v / NUM_INDIVIDUALS for v in hist]
-    print("Normalized Hist: ", [round(v, 4) for v in normalized_hist])
-    xs = get_bin_centers(bins)
-    #print("Bin Centers: ", [round(v, 4) for v in xs])
-    plt.plot(xs, normalized_hist, "b")
-
-    if mode == "save":
-        plt.savefig(f"./belief_histograms/belief_states_{timestep}.png")
-        plt.clf()
-    elif mode == "show":
+        nx.draw(self.graph, node_sizes=node_sizes)
+        plt.title("Network Connections")
         plt.show()
-    else:
-        raise ValueError("mode must be 'save' or 'show'")
-    plt.close(fig)
-
-def create_internal_messages(count):
-    messages = [[] for _ in range(NUM_INDIVIDUALS)]
-    for message_list in messages:
-        while len(message_list) < NUM_MESSAGES:
-            message = np.random.normal(0, 0.5, 1)[0]
-
-            if (message < 1) and (message > -1):
-                message_list.append(message)
-
-    assert len(messages) == NUM_INDIVIDUALS
-    assert len(messages[0]) == NUM_MESSAGES
-
-    return messages
-
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-
-def run_simulation():
-    messages = create_internal_messages(NUM_MESSAGES)
-
-    # show distribution
-    plt.hist(messages, int(NUM_MESSAGES * 0.01))
-    plt.show()
-
-    # run simulation
-    summed_log = [0 for m in range(NUM_MESSAGES)]
-    full_belief_state_log = []
-    individuals = [Individual() for _ in range(NUM_INDIVIDUALS)]
-    for message_index in range(NUM_MESSAGES):
-        for index, indv in enumerate(individuals):
-            indv.read_message(messages[index][message_index])
-        
-        # make everyone listen to a random other person
-        for indv in individuals:
-            indv.listen_to_other(individuals)
-
-        # log belief states
-        all_belief_states = []
-        for indv in individuals:
-            indv.log_belief_state()
-            summed_log[message_index] += indv.belief_state
-            all_belief_states.append(indv.belief_state)
-        
-        full_belief_state_log.append(all_belief_states)
-
-    return summed_log, full_belief_state_log, individuals
-
-def plot_results(summed_log, full_belief_state_log, individuals):
-    # plot belief states
-    for indv in individuals:
-        indv.plot_belief_states()
-    plt.show()
     
-    mean_log = [sum_at_timestep / NUM_INDIVIDUALS for sum_at_timestep in summed_log]
-    plt.plot(mean_log)
-    # indv.plot_friction()
-    #plt.show()
-    #indv.plot_vel()
-    plt.show()
+    def get_frequency_vs_rank_points(self):
+        all_degrees = list(dict(self.graph.degree).values())
+        unique_degrees = sorted(set(all_degrees))
 
-    for timestep, _ in enumerate(full_belief_state_log):
-        display_belief_state_histogram(timestep, full_belief_state_log, mode="save")
+        counts = np.array([all_degrees.count(d) for d in unique_degrees])
+        ranks = np.array(range(len(counts)))
+
+        log_counts = np.log(counts)
+        log_ranks = np.log(ranks)
+
+        return log_counts, log_ranks
+
+    def graph_frequency_vs_rank_points(self):
+        log_counts, log_ranks = self.get_frequency_vs_rank_points()
+        trend_xs, trend_ys = utils.trendline(log_counts, log_ranks)
+        plt.xlabel("log(rank)")
+        plt.ylabel("log(frequency)")
+        plt.plot(log_ranks, log_counts, "b.")
+        plt.plot(trend_xs, trend_ys, "r--")
+        plt.show()
+
+    def get_inbound_connections_to(self, individual):
+        nbunch = self.individuals.index(individual)
+        view = self.graph.in_edges(nbunch)
+        return [self.individuals[e[1]] for e in view]
+
+    def get_outbound_connections_from(self, individual):
+        nbunch = self.individuals.index(individual)
+        view = self.graph.out_edges(nbunch)
+        return [self.individuals[e[1]] for e in view]
 
 def main():
     seaborn.set()
 
+    try:
+        steps = int(sys.argv[1])
+        size = int(sys.argv[2])
+    except:
+        steps = 100
+        size = 800
     seed = random.randint(1, 1000)
     print(f"Seed: {seed}")
-    sim = Simulation(100, 10, seed=seed)
+    sim = Simulation(length=steps, population=size, seed=seed)
     sim.run()
+
+    sim.plot_results()
 
     return sim.mean_log[-1]
 
@@ -307,14 +293,4 @@ if __name__ == "__main__":
     # globally define figure
     
     main()
-
-    """
-    fig = plt.Figure()
-
-    set_seed(1)
-    results = run_simulation()
-
-    print(np.array(results[1]))
-
-    plot_results(*results)
-    """
+    print("Exiting.")
