@@ -1,6 +1,7 @@
 import math
 import random
 import sys
+import pickle
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -120,7 +121,7 @@ class Individual:
         plt.title("Belief States Over Time")
         plt.ylabel("Belief State (in range [-1, 1])")
         plt.xlabel("Message #")
-        plt.plot(self.belief_state_log, "b")
+        plt.plot(self.belief_state_log, "b", alpha=0.07, linewidth=3)
 
     def plot_friction(self):
         plt.plot(self.friction_log, "r")
@@ -145,7 +146,7 @@ class Simulation:
         self.mean_log = [0 for i in range(self.length)]
 
     def run(self):
-        with Bar('Running Simulation', fill='#', suffix='%(percent).1f%% - %(eta)ds') as bar:
+        with Bar('Running Simulation', fill='#', suffix='%(percent).1f%% - %(eta)ds', max=self.length) as bar:
             for step in range(self.length):
                 self.resolve_timestep(step)
                 bar.next()
@@ -176,13 +177,16 @@ class Simulation:
 
         for indv in self.network.individuals:
             indv.plot_belief_states()
+        plt.title("Belief States Over Time")
+        plt.ylabel("Belief States")
+        plt.xlabel("Steps")
         plt.show()
 
         plt.plot(self.mean_log)
         plt.show()
 
         # create and save belief state plots over time
-        with Bar("Saving Plots", fill="#", suffix='%(percent).1f%% - %(eta)ds') as bar:
+        with Bar("Saving Plots", fill="#", suffix='%(percent).1f%% - %(eta)ds', max=len(self.full_belief_state_log)) as bar:
             for timestep, _ in enumerate(self.full_belief_state_log):
                 self.display_belief_state_histogram(timestep, mode="save")
                 bar.next()
@@ -214,6 +218,28 @@ class Simulation:
         else:
             raise ValueError("mode must be 'save' or 'show'")
         plt.close(fig)
+
+    def display_2d_belief_state_histogram(self):
+        xs = []
+        ys = []
+        with Bar("Creating 2d Histogram", fill="#", suffix="%(percent).1f%% - %(eta)ds", max=len(self.full_belief_state_log)) as bar:
+            for step, states in enumerate(self.full_belief_state_log):
+                for state in states:
+                    xs.append(step)
+                    ys.append(state)
+                bar.next()
+
+        plt.hist2d(xs, ys, bins=100)
+        plt.title("Histogram of Belief States Over Time")
+        plt.xlabel("Steps")
+        plt.ylabel("Belief States")
+        plt.show()
+
+    def save_belief_state_log(self, path):
+        with open(path, "wb") as f:
+            pickle.dump(self.full_belief_state_log, f)
+
+        
 
     def set_seed(self, new_seed):
         self.seed = new_seed
@@ -283,6 +309,9 @@ def main():
     sim = Simulation(length=steps, population=size, seed=seed)
     sim.run()
 
+    sim.save_belief_state_log("Belief-State-Log.pkl")
+
+    sim.display_2d_belief_state_histogram()
     sim.plot_results()
 
     return sim.mean_log[-1]
