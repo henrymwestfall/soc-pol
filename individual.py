@@ -108,6 +108,14 @@ class Individual:
         if len(selection) > 0:
             other = random.choice(selection)
             self.read_message(other.belief_state)
+            if self.check_disagreement(other) and abs(other.belief_state) > 0.5:
+                self.network.disconnect(self, other)
+
+    def check_disagreement(self, other):
+        return not self.check_agreement(other)
+
+    def check_agreement(self, other):
+        return math.copysign(1, other.belief_state) == math.copysign(1, self.belief_state)
 
     def read_internal_message(self):
         message = next(self.internal_messages)
@@ -253,6 +261,11 @@ class Network:
         self.graph = nx.scale_free_graph(self.size)
         self.individuals = [Individual(self, tag) for tag in self.graph.nodes]
 
+    def disconnect(self, src, target):
+        src_node = self.individuals.index(src)
+        target_node = self.individuals.index(target)
+        self.graph.remove_edge(src_node, target_node)
+
     def draw_graph(self, max_node_size=300):
         # determine node sizes
         nodes = list(self.graph.nodes)
@@ -312,7 +325,9 @@ def main():
     sim.save_belief_state_log("Belief-State-Log.pkl")
 
     sim.display_2d_belief_state_histogram()
+    sim.network.graph_frequency_vs_rank_points()
     sim.plot_results()
+    
 
     return sim.mean_log[-1]
 
