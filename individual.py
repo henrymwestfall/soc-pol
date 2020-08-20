@@ -29,21 +29,36 @@ def get_bin_centers(bins):
     return centers
 
 
+class Message:
+    def __init__(self, author, value):
+        self.author = author
+        self.value = value
+
+
 class Individual:
     def __init__(self, parent_network, tag):
         self.network = parent_network
         self.tag = tag
 
         self.belief_state = 0.0
+        self.next_belief_state = 0.0
         self.mass = 100
         self.vel = 0.0
+        self.comfort_levels = {}
 
         self.friction_coefficient = 0.001
         self.drag_coefficient = 0.01
 
+        self.disconnect_threshold = -0.5
+        self.connect_threshold = 0.5
+        self.reshare_threshold = 0.15
+
         self.belief_state_log = [self.belief_state]
         self.friction_log = [self.friction]
         self.vel_log = [self.vel]
+
+        self.outbox = [Message(self, self.belief_state)]
+        self.next_outbox = self.outbox.copy()
 
     @property
     def inbound_connections(self):
@@ -61,7 +76,7 @@ class Individual:
             if (message < 1) and (message > -1):
                 continue
 
-            yield message
+            yield Message(self, message)
 
     @property
     def friction(self):
@@ -81,24 +96,48 @@ class Individual:
         return f
 
     def read_message(self, message, time=0.01):
+        # TODO: split this function into multiple functions
+
         # apply force
-        force = message + self.friction + self.wind_resistance
-        self.vel += (force / self.mass) * time
+        force = message.value + self.friction + self.wind_resistance
+        dv = (force / self.mass) * time
+        self.vel += dv
+
+        if not (message.author is self):
+            # adjust comfort levels and make connection if possible
+            self.comfort_levels[message.author] = self.comfort_levels.get(message.author, 0) + dv
+
+            # disconnect or connect based on comfort level
+            if self.comfort_levels[message.author] >= self.connect_threshold and self.connected_to(message.author):
+                self.network.connect(self, message.author)
+            elif self.comfort_levels[message.author] <= self.disconnect_threshold:
+                self.network.disconnect(self, message.author)
+
+            # reshare message if dv exceeds threshold
+            if abs(dv) >= self.reshare_threshold:
+                self.next_outbox.append(message)
 
         # move
-        self.belief_state += self.vel
+        self.next_belief_state += self.vel
 
         # clamp belief state
-        prev_belief_state = self.belief_state
-        self.belief_state = min(1.0, self.belief_state)
-        self.belief_state = max(-1.0, self.belief_state)
-        if prev_belief_state != self.belief_state:
+        prev_belief_state = self.next_belief_state
+        self.next_belief_state = min(1.0, self.next_belief_state)
+        self.next_belief_state = max(-1.0, self.next_belief_state)
+        if prev_belief_state != self.next_belief_state: # if we got clamped, cut velocity
             self.vel = 0
 
-        # record friction
+        # record friction and velocity
         self.friction_log.append(self.friction)
-
         self.vel_log.append(self.vel)
+
+    def update(self):
+        self.belief_state = self.next_belief_state
+        self.outbox = self.next_outbox.copy() # shallow
+        self.next_outbox = [Message(self, self.belief_state)]
+
+    def connected_to(self, other):
+        return other in self.outbound_connections
 
     def listen_to_other(self, everyone):
         selection = everyone.copy() # shallow
@@ -106,10 +145,18 @@ class Individual:
             selection.remove(self)
 
         if len(selection) > 0:
-            other = random.choice(selection)
-            self.read_message(other.belief_state)
-            if self.check_disagreement(other) and abs(other.belief_state) > 0.5:
-                self.network.disconnect(self, other)
+            failures = 0
+            messages = []
+            while failures < 3 and len(messages) < 3:
+                other = random.choice(selection)
+                message = random.choice(other.outbox)
+                if message in messages:
+                    failures += 1
+                else:
+                    messages.append(message)
+            
+            for message in messages:
+                self.read_message(message)
 
     def check_disagreement(self, other):
         return not self.check_agreement(other)
@@ -147,6 +194,7 @@ class Simulation:
         self.population = population
 
         self.network = Network(self.population)
+        self.individuals = self.network.individuals.copy() # shallow
 
         # logs
         self.full_belief_state_log = []
@@ -165,10 +213,13 @@ class Simulation:
 
     def update_everyone(self):
         # TODO: use network connections
-        for indv in self.network.individuals:
+        random.shuffle(self.individuals) # change order of things
+        for indv in self.individuals:
             indv.read_internal_message()
-        for indv in self.network.individuals:
+        for indv in self.individuals:
             indv.listen_to_other(indv.outbound_connections)
+        for indv in self.individuals:
+            indv.update()
 
     def log_belief_states(self, step):
         all_belief_states = []
@@ -265,6 +316,11 @@ class Network:
         src_node = self.individuals.index(src)
         target_node = self.individuals.index(target)
         self.graph.remove_edge(src_node, target_node)
+
+    def connect(self, src, target):
+        src_node = self.individuals.index(src)
+        target_node = self.individuals.index(target)
+        self.graph.add_edge(src_node, target_node)
 
     def draw_graph(self, max_node_size=300):
         # determine node sizes
