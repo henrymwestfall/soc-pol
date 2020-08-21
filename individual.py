@@ -2,13 +2,16 @@ import math
 import random
 import sys
 import pickle
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 import seaborn
 import cProfile
+from multiprocessing import Process
 from progress.bar import Bar
+from pygame import Color # for coloring nodes
 
 import utils
 
@@ -49,8 +52,6 @@ class Individual:
         self.friction_coefficient = 0.001
         self.drag_coefficient = 0.01
 
-        self.disconnect_threshold = -0.5
-        self.connect_threshold = 0.5
         self.reshare_threshold = 0.15
 
         self.belief_state_log = [self.belief_state]
@@ -108,9 +109,9 @@ class Individual:
             self.comfort_levels[message.author] = self.comfort_levels.get(message.author, 0) + dv
 
             # disconnect or connect based on comfort level
-            if self.comfort_levels[message.author] >= self.connect_threshold and self.connected_to(message.author):
+            if self.check_agreement(message.author) and abs(message.value) > 0.5:
                 self.network.connect(self, message.author)
-            elif self.comfort_levels[message.author] <= self.disconnect_threshold:
+            elif self.check_disagreement(message.author) and abs(message.value) > 0.5:
                 self.network.disconnect(self, message.author)
 
             # reshare message if dv exceeds threshold
@@ -145,18 +146,10 @@ class Individual:
             selection.remove(self)
 
         if len(selection) > 0:
-            failures = 0
-            messages = []
-            while failures < 3 and len(messages) < 3:
-                other = random.choice(selection)
-                message = random.choice(other.outbox)
-                if message in messages:
-                    failures += 1
-                else:
-                    messages.append(message)
-            
-            for message in messages:
-                self.read_message(message)
+            other = random.choice(selection)
+            message = random.choice(other.outbox)
+
+            self.read_message(message)
 
     def check_disagreement(self, other):
         return not self.check_agreement(other)
@@ -201,15 +194,66 @@ class Simulation:
         self.summed_log = [0 for i in range(self.length)]
         self.mean_log = [0 for i in range(self.length)]
 
+        # timing
+        self.start_time = 0
+        self.end_time = 0
+
     def run(self):
+        self.start_time = time.time()
         with Bar('Running Simulation', fill='#', suffix='%(percent).1f%% - %(eta)ds', max=self.length) as bar:
             for step in range(self.length):
                 self.resolve_timestep(step)
                 bar.next()
+        self.end_time = time.time()
 
     def resolve_timestep(self, step):
         self.update_everyone()
         self.log_belief_states(step)
+
+    def process_group(self, group, callback):
+        for indv in group:
+            callback(indv)
+
+    def call_indv_read_internal_message(self, indv):
+        indv.read_internal_message()
+
+    def call_indv_listen_to_other(self, indv):
+        indv.listen_to_other(indv.outbound_connections)
+
+    def call_indv_update(self, indv):
+        indv.update()
+
+    # NOTE: this does not yet work
+    def update_everyone_parallel(self):
+        # TODO: use network connections
+        random.shuffle(self.individuals) # change order of things
+
+        # processes
+        end1 = int(len(self.individuals) * 0.25)
+        end2 = int(len(self.individuals) * 0.5)
+        end3 = int(len(self.individuals) * 0.75)
+
+        callbacks = [self.call_indv_read_internal_message, self.call_indv_listen_to_other, self.call_indv_update]
+
+        for callback in callbacks:
+            p1 = Process(target=self.process_group, args=(self.individuals[:end1], callback))
+            p1.start()
+            #p1.join()
+
+            p2 = Process(target=self.process_group, args=(self.individuals[end1:end2], callback))
+            p2.start()
+            #p2.join()
+
+            p3 = Process(target=self.process_group, args=(self.individuals[end2:end3], callback))
+            p3.start()
+            #p3.join()
+
+            p4 = Process(target=self.process_group, args=(self.individuals[end3:], callback))
+            p4.start()
+            #p4.join()
+
+            while p1.is_alive() or p2.is_alive() or p3.is_alive() or p4.is_alive():
+                time.sleep(0.05)
 
     def update_everyone(self):
         # TODO: use network connections
@@ -294,6 +338,20 @@ class Simulation:
         plt.ylabel("Belief States")
         plt.show()
 
+    def plot_outbound_connection_change(self, bins=100):
+        all_changes = []
+        for indv in self.individuals:
+            original_connections = self.network.get_outbound_connections_from(indv, "original")
+            current_connections = self.network.get_outbound_connections_from(indv)
+            changes = 0
+            for connection in original_connections + current_connections:
+                if (connection in original_connections) ^ (connection in original_connections):
+                    changes += 1
+            all_changes.append(changes)
+        
+        plt.hist(all_changes, bins)
+        plt.show()
+
     def save_belief_state_log(self, path):
         with open(path, "wb") as f:
             pickle.dump(self.full_belief_state_log, f)
@@ -309,7 +367,8 @@ class Simulation:
 class Network:
     def __init__(self, size):
         self.size = size
-        self.graph = nx.scale_free_graph(self.size)
+        self.original_graph = nx.scale_free_graph(self.size)
+        self.graph = self.original_graph.copy()
         self.individuals = [Individual(self, tag) for tag in self.graph.nodes]
 
     def disconnect(self, src, target):
@@ -322,14 +381,32 @@ class Network:
         target_node = self.individuals.index(target)
         self.graph.add_edge(src_node, target_node)
 
+    def get_rgb_color_from_state(self, belief_state):
+        if belief_state > 0:
+            h = 0 # red hue
+        else:
+            h = 120 # green hue (blue often does not appear with seaborn styling)
+        s = abs(belief_state) * 100 # saturation depends on polarization
+        if s < 30: # clamp at 30 to avoid white dots
+            s = 30
+        color = Color(0, 0, 0)
+        color.hsva = (h, s, 100, 100) # value and alpha are always 100
+        rgb = (color.r / 255, color.g / 255, color.b / 255)
+        return rgb
+
     def draw_graph(self, max_node_size=300):
         # determine node sizes
         nodes = list(self.graph.nodes)
-        degrees = [self.graph.degree[n] for n in nodes]
+        degrees = [len(self.graph.in_edges(n)) for n in nodes]
         highest = max(degrees)
         node_sizes = [(d / highest) * max_node_size for d in degrees]
+        node_colors = []
+        for node in nodes:
+            indv = self.individuals[node]
+            c = self.get_rgb_color_from_state(indv.belief_state)
+            node_colors.append(c)
 
-        nx.draw(self.graph, node_sizes=node_sizes)
+        nx.draw_networkx(self.graph, node_list=nodes, node_size=node_sizes, with_labels=False, node_color=node_colors)
         plt.title("Network Connections")
         plt.show()
     
@@ -354,14 +431,23 @@ class Network:
         plt.plot(trend_xs, trend_ys, "r--")
         plt.show()
 
-    def get_inbound_connections_to(self, individual):
+    def get_inbound_connections_to(self, individual, graph_state="current"):
+        if graph_state == "current":
+            graph = self.graph
+        else:
+            graph = self.original_graph
+
         nbunch = self.individuals.index(individual)
-        view = self.graph.in_edges(nbunch)
+        view = graph.in_edges(nbunch)
         return [self.individuals[e[1]] for e in view]
 
-    def get_outbound_connections_from(self, individual):
+    def get_outbound_connections_from(self, individual, graph_state="current"):
+        if graph_state == "current":
+            graph = self.graph
+        else:
+            graph = self.original_graph
         nbunch = self.individuals.index(individual)
-        view = self.graph.out_edges(nbunch)
+        view = graph.out_edges(nbunch)
         return [self.individuals[e[1]] for e in view]
 
 def main():
@@ -373,17 +459,18 @@ def main():
     except:
         steps = 100
         size = 800
-    seed = random.randint(1, 1000)
+    seed = 811#random.randint(1, 1000)
     print(f"Seed: {seed}")
     sim = Simulation(length=steps, population=size, seed=seed)
     sim.run()
+    print("Total Runtime:", sim.end_time - sim.start_time)
 
     sim.save_belief_state_log("Belief-State-Log.pkl")
 
     sim.display_2d_belief_state_histogram()
     sim.network.graph_frequency_vs_rank_points()
+    sim.plot_outbound_connection_change()
     sim.plot_results()
-    
 
     return sim.mean_log[-1]
 
