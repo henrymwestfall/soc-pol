@@ -3,6 +3,7 @@ import random
 import sys
 import pickle
 import time
+import json
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -412,9 +413,9 @@ class Network:
     
     def get_frequency_vs_rank_points(self):
         all_degrees = list(dict(self.graph.degree).values())
-        unique_degrees = sorted(set(all_degrees))
+        unique_degrees = set(all_degrees)
 
-        counts = np.array([all_degrees.count(d) for d in unique_degrees])
+        counts = sorted(np.array([all_degrees.count(d) for d in unique_degrees]), reverse=True)
         ranks = np.array(range(len(counts)))
 
         log_counts = np.log(counts)
@@ -425,11 +426,13 @@ class Network:
     def graph_frequency_vs_rank_points(self):
         log_counts, log_ranks = self.get_frequency_vs_rank_points()
         trend_xs, trend_ys = utils.trendline(log_counts, log_ranks)
+        plt.figure()
         plt.xlabel("log(rank)")
         plt.ylabel("log(frequency)")
         plt.plot(log_ranks, log_counts, "b.")
         plt.plot(trend_xs, trend_ys, "r--")
         plt.show()
+        plt.clf()
 
     def get_inbound_connections_to(self, individual, graph_state="current"):
         if graph_state == "current":
@@ -450,6 +453,9 @@ class Network:
         view = graph.out_edges(nbunch)
         return [self.individuals[e[1]] for e in view]
 
+    def save(self):
+        pass
+
 def main():
     seaborn.set()
 
@@ -459,7 +465,7 @@ def main():
     except:
         steps = 100
         size = 800
-    seed = 811#random.randint(1, 1000)
+    seed = random.randint(1, 1000)
     print(f"Seed: {seed}")
     sim = Simulation(length=steps, population=size, seed=seed)
     sim.run()
